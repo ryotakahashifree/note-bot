@@ -20,24 +20,31 @@ function stripMarkdown(text) {
     .trim();
 }
 
-// Pollinations.ai で無料スピリチュアル画像を生成・ダウンロード
+// Pollinations.ai で無料スピリチュアル画像を生成・ダウンロード（最大3回リトライ）
 async function downloadSpiritualImage(imagePrompt) {
   const savePath = path.join('d:/claudecode/note-bot', 'cover-image.jpg');
   const fullPrompt = imagePrompt + ', no text, no watermark, high quality, 4k';
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?width=1280&height=720&nologo=true&seed=${Date.now()}`;
 
-  console.log('🎨 スピリチュアル画像を生成中...');
-  const response = await axios({ url, responseType: 'stream', timeout: 60000 });
-  const writer = fs.createWriteStream(savePath);
-  response.data.pipe(writer);
-
-  await new Promise((resolve, reject) => {
-    writer.on('finish', resolve);
-    writer.on('error', reject);
-  });
-
-  console.log('✅ 画像生成完了:', savePath);
-  return savePath;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const seed = Date.now() + attempt;
+      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?width=1280&height=720&nologo=true&seed=${seed}&model=flux`;
+      console.log(`🎨 スピリチュアル画像を生成中... (試行 ${attempt}/3)`);
+      const response = await axios({ url, responseType: 'stream', timeout: 90000 });
+      const writer = fs.createWriteStream(savePath);
+      response.data.pipe(writer);
+      await new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
+      console.log('✅ 画像生成完了:', savePath);
+      return savePath;
+    } catch (e) {
+      console.warn(`⚠️ 画像生成 試行${attempt} 失敗: ${e.message}`);
+      if (attempt < 3) await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+  return null;
 }
 
 async function postToNote(article) {
