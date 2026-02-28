@@ -2,16 +2,59 @@
 require('dotenv').config({ path: '../n8n/.env' });
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 puppeteer.use(StealthPlugin());
 
 const NOTE_EMAIL = process.env.NOTE_EMAIL;
 const NOTE_PASSWORD = process.env.NOTE_PASSWORD;
 
+// 残ったマークダウン記号を除去する保険
+function stripMarkdown(text) {
+  return text
+    .replace(/#{1,6}\s+/g, '')
+    .replace(/\*\*(.*?)\*\*/gs, '$1')
+    .replace(/\*(.*?)\*/gs, '$1')
+    .replace(/_{2}(.*?)_{2}/gs, '$1')
+    .trim();
+}
+
+// Pollinations.ai で無料スピリチュアル画像を生成・ダウンロード
+async function downloadSpiritualImage(imagePrompt) {
+  const savePath = path.join('d:/claudecode/note-bot', 'cover-image.jpg');
+  const fullPrompt = imagePrompt + ', no text, no watermark, high quality, 4k';
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?width=1280&height=720&nologo=true&seed=${Date.now()}`;
+
+  console.log('🎨 スピリチュアル画像を生成中...');
+  const response = await axios({ url, responseType: 'stream', timeout: 60000 });
+  const writer = fs.createWriteStream(savePath);
+  response.data.pipe(writer);
+
+  await new Promise((resolve, reject) => {
+    writer.on('finish', resolve);
+    writer.on('error', reject);
+  });
+
+  console.log('✅ 画像生成完了:', savePath);
+  return savePath;
+}
+
 async function postToNote(article) {
   console.log('🚀 Note.com への投稿を開始します...');
 
+  // 画像生成（並列で実行）
+  let imagePath = null;
+  if (article.image_prompt) {
+    try {
+      imagePath = await downloadSpiritualImage(article.image_prompt);
+    } catch (e) {
+      console.warn('⚠️ 画像生成スキップ:', e.message);
+    }
+  }
+
   const browser = await puppeteer.launch({
-    headless: false, // デバッグ中は画面を表示（動作確認後 true に変更）
+    headless: false,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
     defaultViewport: { width: 1280, height: 800 }
   });
@@ -24,19 +67,13 @@ async function postToNote(article) {
     await page.goto('https://note.com/login', { waitUntil: 'networkidle2', timeout: 30000 });
     await new Promise(r => setTimeout(r, 2000));
 
-    // スクリーンショットでページ状態を確認
-    await page.screenshot({ path: 'd:/claudecode/note-bot/debug-login.png' });
-    console.log('📸 スクリーンショット保存: debug-login.png');
-
-    // メールアドレス入力（複数セレクタを試行）
+    // メールアドレス入力
     const emailSelectors = [
       '.o-login__mailField input',
       'input[name="email"]',
       'input[type="email"]',
       'input[placeholder*="メール"]',
-      'input[placeholder*="mail"]',
     ];
-
     let emailInput = null;
     for (const sel of emailSelectors) {
       try {
@@ -44,41 +81,49 @@ async function postToNote(article) {
         emailInput = sel;
         console.log('✅ メール入力フィールド発見:', sel);
         break;
-      } catch {
-        // 次のセレクタを試す
-      }
+      } catch { /* 次を試す */ }
     }
-
     if (!emailInput) {
       await page.screenshot({ path: 'd:/claudecode/note-bot/debug-error.png' });
-      throw new Error('メール入力フィールドが見つかりませんでした（debug-error.png 参照）');
+      throw new Error('メール入力フィールドが見つかりません');
     }
 
     await page.click(emailInput);
     await page.type(emailInput, NOTE_EMAIL, { delay: 50 });
-
-    // パスワード入力
     await page.waitForSelector('input[type="password"]', { timeout: 5000 });
     await page.type('input[type="password"]', NOTE_PASSWORD, { delay: 50 });
-
-    // Enterキーでログイン送信
     await page.keyboard.press('Enter');
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 });
-    console.log('✅ ログイン完了 - URL:', page.url());
+    console.log('✅ ログイン完了');
 
     // ② 新規記事作成ページへ
     console.log('📝 新規記事作成ページへ移動...');
     await page.goto('https://note.com/new', { waitUntil: 'networkidle2', timeout: 30000 });
     await new Promise(r => setTimeout(r, 3000));
 
-    // ③ タイトル入力
+    // ③ カバー画像アップロード（ファイル入力を探す）
+    if (imagePath) {
+      try {
+        const fileInputs = await page.$$('input[type="file"]');
+        if (fileInputs.length > 0) {
+          await fileInputs[0].uploadFile(imagePath);
+          console.log('✅ カバー画像アップロード完了');
+          await new Promise(r => setTimeout(r, 2000));
+        } else {
+          console.warn('⚠️ ファイル入力が見つかりません。画像は手動でアップロードしてください:', imagePath);
+        }
+      } catch (e) {
+        console.warn('⚠️ 画像アップロードスキップ:', e.message, '\n   画像パス:', imagePath);
+      }
+    }
+
+    // ④ タイトル入力
     const titleSelectors = [
       'textarea[placeholder*="タイトル"]',
       'input[placeholder*="タイトル"]',
       '.title-input',
       '[data-placeholder*="タイトル"]',
     ];
-
     let titleInput = null;
     for (const sel of titleSelectors) {
       try {
@@ -87,24 +132,17 @@ async function postToNote(article) {
         break;
       } catch {}
     }
-
     if (titleInput) {
       await page.click(titleInput);
       await page.keyboard.type(article.title, { delay: 30 });
       console.log('✅ タイトル入力:', article.title);
     } else {
-      console.warn('⚠️ タイトルフィールドが見つかりませんでした');
+      console.warn('⚠️ タイトルフィールドが見つかりません');
     }
 
-    // ④ 本文入力
+    // ⑤ 本文入力（マークダウン記号を念のためクリーニング）
     await new Promise(r => setTimeout(r, 1000));
-    const bodySelectors = [
-      '.ProseMirror',
-      '[contenteditable="true"]',
-      '.editor-body',
-      '.note-editor [contenteditable]',
-    ];
-
+    const bodySelectors = ['.ProseMirror', '[contenteditable="true"]', '.editor-body'];
     let bodyInput = null;
     for (const sel of bodySelectors) {
       try {
@@ -113,27 +151,31 @@ async function postToNote(article) {
         break;
       } catch {}
     }
-
     if (bodyInput) {
+      const lead = stripMarkdown(article.lead);
+      const freeContent = stripMarkdown(article.free_content);
+      const paidContent = stripMarkdown(article.paid_content);
+
       await page.click(bodyInput);
-      await page.keyboard.type(article.lead + '\n\n', { delay: 20 });
-      await page.keyboard.type(article.free_content + '\n\n', { delay: 20 });
-      await page.keyboard.type(article.paid_content, { delay: 10 });
+      await page.keyboard.type(lead + '\n\n', { delay: 20 });
+      await page.keyboard.type(freeContent + '\n\n', { delay: 10 });
+      await page.keyboard.type(paidContent, { delay: 5 });
       console.log('✅ 本文入力完了');
     } else {
-      console.warn('⚠️ 本文エディタが見つかりませんでした');
+      console.warn('⚠️ 本文エディタが見つかりません');
     }
 
     await new Promise(r => setTimeout(r, 2000));
 
-    // ⑤ 投稿設定（価格・タグ）は手動確認のためここで一時停止
-    console.log('\n⚠️  価格・タグ設定を手動で行ってください');
-    console.log(`   価格: ¥${article.price}`);
-    console.log(`   タグ: ${article.tags.join(', ')}`);
-    console.log('   30秒後に自動でブラウザを閉じます...');
+    // ⑥ 手動設定待ち
+    console.log('\n⚠️  以下を手動で設定してください:');
+    console.log(`   💰 価格: ¥${article.price} を設定して公開`);
+    console.log(`   🏷️  タグ: ${article.tags.join(', ')}`);
+    if (imagePath) console.log(`   🖼️  画像: ${imagePath} （自動アップロード試行済み）`);
+    console.log('   30秒後にブラウザを閉じます...');
 
     await new Promise(r => setTimeout(r, 30000));
-    console.log('✅ 投稿プロセス完了（確認のため自動投稿はスキップ）');
+    console.log('✅ 完了');
 
   } catch (error) {
     console.error('❌ エラー:', error.message);
@@ -149,11 +191,11 @@ if (require.main === module) {
   const sampleArticle = {
     title: '【2月】潜在意識があなたに送っているサイン3つ',
     lead: 'もしかして最近、同じ数字をよく見かけたり、突然懐かしい人のことを思い出したりしませんか？それは偶然ではありません。',
-    free_content: '## あなたの潜在意識は常にメッセージを送っています\n\n（サンプルテキスト）',
-    paid_content: '## 【有料】詳細リーディング\n\n（サンプルテキスト）',
+    free_content: '✨【あなたの潜在意識はメッセージを送っています】✨\n\n（サンプルテキスト）',
+    paid_content: '🔮【詳細リーディング】🔮\n\n（サンプルテキスト）',
     tags: ['スピリチュアル', '占い', '引き寄せの法則'],
-    price: 500
+    price: 500,
+    image_prompt: 'ethereal spiritual woman, purple golden divine light, sacred geometry, mystical cosmic background'
   };
-
   postToNote(sampleArticle).catch(console.error);
 }
