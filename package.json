@@ -1,0 +1,16 @@
+{
+  "name": "note-bot",
+  "version": "1.0.0",
+  "description": "Note.com 自動投稿bot（占い×自己啓発）",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test-generate": "node generate.js",
+    "test-post": "node post.js"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0",
+    "dotenv": "^16.0.0",
+    "axios": "^1.6.0"
+  }
+}
