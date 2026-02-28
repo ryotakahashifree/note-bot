@@ -1,6 +1,8 @@
 // post.js - Puppeteerを使ってNote.comに記事を自動投稿する
 require('dotenv').config({ path: '../n8n/.env' });
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 
 const NOTE_EMAIL = process.env.NOTE_EMAIL;
 const NOTE_PASSWORD = process.env.NOTE_PASSWORD;
@@ -19,51 +21,118 @@ async function postToNote(article) {
 
     // ① ログイン
     console.log('🔑 ログイン中...');
-    await page.goto('https://note.com/login', { waitUntil: 'networkidle2' });
-    await page.waitForSelector('input[type="email"]', { timeout: 10000 });
-    await page.type('input[type="email"]', NOTE_EMAIL, { delay: 50 });
+    await page.goto('https://note.com/login', { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
+
+    // スクリーンショットでページ状態を確認
+    await page.screenshot({ path: 'd:/claudecode/note-bot/debug-login.png' });
+    console.log('📸 スクリーンショット保存: debug-login.png');
+
+    // メールアドレス入力（複数セレクタを試行）
+    const emailSelectors = [
+      '.o-login__mailField input',
+      'input[name="email"]',
+      'input[type="email"]',
+      'input[placeholder*="メール"]',
+      'input[placeholder*="mail"]',
+    ];
+
+    let emailInput = null;
+    for (const sel of emailSelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 3000 });
+        emailInput = sel;
+        console.log('✅ メール入力フィールド発見:', sel);
+        break;
+      } catch {
+        // 次のセレクタを試す
+      }
+    }
+
+    if (!emailInput) {
+      await page.screenshot({ path: 'd:/claudecode/note-bot/debug-error.png' });
+      throw new Error('メール入力フィールドが見つかりませんでした（debug-error.png 参照）');
+    }
+
+    await page.click(emailInput);
+    await page.type(emailInput, NOTE_EMAIL, { delay: 50 });
+
+    // パスワード入力
+    await page.waitForSelector('input[type="password"]', { timeout: 5000 });
     await page.type('input[type="password"]', NOTE_PASSWORD, { delay: 50 });
+
+    // Enterキーでログイン送信
     await page.keyboard.press('Enter');
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
-    console.log('✅ ログイン完了');
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 });
+    console.log('✅ ログイン完了 - URL:', page.url());
 
     // ② 新規記事作成ページへ
     console.log('📝 新規記事作成ページへ移動...');
-    await page.goto('https://note.com/new', { waitUntil: 'networkidle2' });
-    await page.waitForTimeout(2000);
+    await page.goto('https://note.com/new', { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 3000));
 
     // ③ タイトル入力
-    const titleSelector = 'textarea[placeholder*="タイトル"], input[placeholder*="タイトル"], .title-input';
-    await page.waitForSelector(titleSelector, { timeout: 10000 });
-    await page.click(titleSelector);
-    await page.keyboard.type(article.title, { delay: 30 });
-    console.log('✅ タイトル入力:', article.title);
+    const titleSelectors = [
+      'textarea[placeholder*="タイトル"]',
+      'input[placeholder*="タイトル"]',
+      '.title-input',
+      '[data-placeholder*="タイトル"]',
+    ];
 
-    // ④ 本文入力（無料パート）
-    await page.waitForTimeout(1000);
-    const bodySelector = '.ProseMirror, [contenteditable="true"], .editor-body';
-    await page.waitForSelector(bodySelector, { timeout: 10000 });
-    await page.click(bodySelector);
-    await page.keyboard.type(article.lead + '\n\n', { delay: 20 });
-    await page.keyboard.type(article.free_content + '\n\n', { delay: 20 });
-    console.log('✅ 無料パート入力完了');
+    let titleInput = null;
+    for (const sel of titleSelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 3000 });
+        titleInput = sel;
+        break;
+      } catch {}
+    }
 
-    // ⑤ 有料ライン設定（有料パートの前にラインを挿入）
-    // Note の有料ライン設定はUIが複雑なため、まずは本文に有料パートも含める
-    await page.keyboard.type(article.paid_content, { delay: 10 });
-    console.log('✅ 有料パート入力完了');
+    if (titleInput) {
+      await page.click(titleInput);
+      await page.keyboard.type(article.title, { delay: 30 });
+      console.log('✅ タイトル入力:', article.title);
+    } else {
+      console.warn('⚠️ タイトルフィールドが見つかりませんでした');
+    }
 
-    await page.waitForTimeout(2000);
+    // ④ 本文入力
+    await new Promise(r => setTimeout(r, 1000));
+    const bodySelectors = [
+      '.ProseMirror',
+      '[contenteditable="true"]',
+      '.editor-body',
+      '.note-editor [contenteditable]',
+    ];
 
-    // ⑥ 投稿設定（価格・タグ）は手動確認のためここで一時停止
-    console.log('⚠️  価格・タグ設定を手動で行ってください');
+    let bodyInput = null;
+    for (const sel of bodySelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 3000 });
+        bodyInput = sel;
+        break;
+      } catch {}
+    }
+
+    if (bodyInput) {
+      await page.click(bodyInput);
+      await page.keyboard.type(article.lead + '\n\n', { delay: 20 });
+      await page.keyboard.type(article.free_content + '\n\n', { delay: 20 });
+      await page.keyboard.type(article.paid_content, { delay: 10 });
+      console.log('✅ 本文入力完了');
+    } else {
+      console.warn('⚠️ 本文エディタが見つかりませんでした');
+    }
+
+    await new Promise(r => setTimeout(r, 2000));
+
+    // ⑤ 投稿設定（価格・タグ）は手動確認のためここで一時停止
+    console.log('\n⚠️  価格・タグ設定を手動で行ってください');
     console.log(`   価格: ¥${article.price}`);
     console.log(`   タグ: ${article.tags.join(', ')}`);
-    console.log('   設定完了後、Enterを押すと投稿します...');
+    console.log('   30秒後に自動でブラウザを閉じます...');
 
-    // 確認のため30秒待機（本番では自動化）
-    await page.waitForTimeout(30000);
-
+    await new Promise(r => setTimeout(r, 30000));
     console.log('✅ 投稿プロセス完了（確認のため自動投稿はスキップ）');
 
   } catch (error) {
@@ -77,7 +146,6 @@ async function postToNote(article) {
 module.exports = { postToNote };
 
 if (require.main === module) {
-  // テスト用サンプル記事
   const sampleArticle = {
     title: '【2月】潜在意識があなたに送っているサイン3つ',
     lead: 'もしかして最近、同じ数字をよく見かけたり、突然懐かしい人のことを思い出したりしませんか？それは偶然ではありません。',
